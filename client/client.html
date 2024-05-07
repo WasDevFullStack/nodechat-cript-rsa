@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chat</title>
+    <!-- Adicionando Bootstrap -->
+    <link href="./bootstrap.min.css" rel="stylesheet">
+
+    <script src="jquery-3.6.0.min.js"></script>
+    <script src="bootstrap.min.js"></script>
+    <script src="pako.min.js"></script>
+    <script src="openpgp.min.js"></script>
+    <style>
+        /* Estilos personalizados */
+        .connected-clients {
+            margin-bottom: 20px;
+        }
+        .message-box {
+            background-color: #f8f9fa;
+            padding: 10px;
+            border-radius: 5px;
+            margin-bottom: 10px;
+        }
+        .message-sender {
+            font-weight: bold;
+            color: #007bff;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1 class="mt-5 mb-4 text-center">Chat</h1>
+        <div class="row">
+            <div class="col-md-6">
+                <div class="connected-clients">
+                    <h2 class="mb-3">Clientes Conectados</h2>
+                    <ul id="client-list" class="list-group"></ul>
+                </div>
+            </div>
+            <div class="col-md-6">
+                <div class="mb-3">
+                    <h2>Conectar com outro cliente</h2>
+                    <input type="text" id="client-id" class="form-control mb-2" placeholder="ID do cliente">
+                    <textarea id="message" class="form-control mb-2" rows="3" placeholder="Digite sua mensagem"></textarea>
+                    <button onclick="sendMessage()" class="btn btn-primary">Enviar</button>
+                    <div id="status" class="mt-2"></div>
+                </div>
+            </div>
+        </div>
+        <!-- Box para mensagens recebidas -->
+        <div id="message-box" class="message-box"></div>
+    </div>
+
+    <script>
+
+        let exportedPublicKey;
+        let publicKey;
+        let privateKey;
+        
+        let clients;
+        let selectedClient;
+
+        const clientList = document.getElementById('client-list');
+        const clientIdInput = document.getElementById('client-id');
+        const messageInput = document.getElementById('message');
+        const statusDiv = document.getElementById('status');
+        const messageBox = document.getElementById('message-box');
+        let name;
+
+        const socket = new WebSocket('ws://localhost:8080');
+
+        socket.onopen = async () => {
+            console.log('Conexão estabelecida com o servidor');
+            await generateKeyPair();
+            name = prompt('Digite seu nome:');
+            if (name.trim() !== '') {
+
+                const pkey = `-----BEGIN PUBLIC KEY-----\n${arrayBufferToBase64(exportedPublicKey)}\n-----END PUBLIC KEY-----`;
+
+                socket.send(JSON.stringify({ type: 'setName', name:name, publicKey:pkey }));
+            }
+        };
+
+        socket.onmessage = async (event) => {
+            const data = JSON.parse(event.data);
+            if (data.type === 'clients') {
+                updateClientList(data.clients);
+            }else if(data.type === 'nomeJaExiste'){
+                await generateKeyPair();
+                name = prompt('O nome já existe, tente outro:');
+                if (name.trim() !== '') {
+
+                    const pkey = `-----BEGIN PUBLIC KEY-----\n${arrayBufferToBase64(exportedPublicKey)}\n-----END PUBLIC KEY-----`;
+
+                    socket.send(JSON.stringify({ type: 'setName', name:name, publicKey:pkey }));
+                }  
+            } else if (data.type === 'message') {
+                showMessage(data.sender, data.message);
+            } else {
+                console.log('Mensagem recebida:', data.message);
+            }
+        };
+
+        function updateClientList(clients) {
+            console.log(clients);
+            clients = clients;
+            clientList.innerHTML = '';
+            clients.forEach(client => {
+                const li = document.createElement('li');
+                li.textContent = client.name;
+                li.classList.add('list-group-item');
+                li.addEventListener('click', () => selectClient(client));
+                clientList.appendChild(li);
+            });
+        }
+
+        function selectClient(client) {
+            clientIdInput.value = client.name;
+            selectedClient = client;
+        }
+
+        async function sendMessage() {
+            const clientId = clientIdInput.value;
+            const message = messageInput.value;
+
+            if (!clientId || !message) {
+                statusDiv.textContent = 'Por favor, preencha o ID do cliente e a mensagem.';
+                return;
+            }
+
+            const data = {
+                type: 'sendMessage',
+                clientId: clientId,
+                message: await encryptMessage(message,selectedClient.publicKey)
+            };
+
+            socket.send(JSON.stringify(data));
+            statusDiv.textContent = 'Mensagem enviada com sucesso!';
+        }
+
+        async function showMessage(sender, message) {
+            const div = document.createElement('div');
+            const messageContent = document.createElement('span');
+            const senderSpan = document.createElement('span');
+            senderSpan.textContent = sender + ': ';
+            senderSpan.classList.add('message-sender');
+            messageContent.textContent = await decryptMessage(message,privateKey);
+            div.appendChild(senderSpan);
+            div.appendChild(messageContent);
+            div.classList.add('message-box');
+            messageBox.prepend(div);
+        }
+
+        async function generateKeyPair() {
+            try {
+                // Gerar as chaves RSA para a caixa de mensagens
+                const keys = await window.crypto.subtle.generateKey(
+                    {
+                        name: "RSA-OAEP",
+                        modulusLength: 2048,
+                        publicExponent: new Uint8Array([0x01, 0x00, 0x01]), // 65537
+                        hash: { name: "SHA-256" }
+                    },
+                    true, // Extrair a chave privada também
+                    ["encrypt", "decrypt"]
+                );
+
+                // Armazenar as chaves RSA
+                publicKey = keys.publicKey;
+                privateKey = keys.privateKey;
+
+                exportedPublicKey = await window.crypto.subtle.exportKey(
+                    "spki",
+                    publicKey
+                );
+                
+            } catch (error) {
+                console.error(error);
+            }
+        }
+
+        // Função para converter um ArrayBuffer em uma string base64
+        function arrayBufferToBase64(buffer) {
+            let binary = '';
+            const bytes = new Uint8Array(buffer);
+            const len = bytes.byteLength;
+            for (let i = 0; i < len; i++) {
+                binary += String.fromCharCode(bytes[i]);
+            }
+            return window.btoa(binary);
+        }
+
+        // Função para converter uma string base64 em um ArrayBuffer
+        function base64ToArrayBuffer(base64) {
+            const binaryString = window.atob(base64);
+            const bytes = new Uint8Array(binaryString.length);
+            for (let i = 0; i < binaryString.length; i++) {
+                bytes[i] = binaryString.charCodeAt(i);
+            }
+            return bytes.buffer;
+        }
+
+        async function encryptMessage(message, publicKey) {
+
+            const ipk = await importPublicKey(publicKey);
+
+            let encodedMessage = new TextEncoder().encode(message);
+
+            const encryptedMessage = await window.crypto.subtle.encrypt(
+                {
+                    name: "RSA-OAEP"
+                },
+                ipk,
+                encodedMessage
+            );
+
+
+            return arrayBufferToBase64(encryptedMessage);
+        }
+
+
+        async function decryptMessage(encryptedMessage, privateKey) {
+
+
+            const decryptedMessage = await window.crypto.subtle.decrypt(
+                {
+                    name: "RSA-OAEP"
+                },
+                privateKey,
+                base64ToArrayBuffer(encryptedMessage)
+            );
+            return new TextDecoder().decode(decryptedMessage);
+        }
+
+        async function importPublicKey(keyData) {
+            // Converter a chave pública de PEM para ArrayBuffer
+            const pemString = keyData.replace("-----BEGIN PUBLIC KEY-----", "").replace("-----END PUBLIC KEY-----", "");
+            const binaryString = window.atob(pemString);
+            const bytes = new Uint8Array(binaryString.length);
+            for (let i = 0; i < binaryString.length; i++) {
+                bytes[i] = binaryString.charCodeAt(i);
+            }
+            const publicKeyBuffer = bytes.buffer;
+
+            // Importar a chave pública
+            const importedKey = await window.crypto.subtle.importKey(
+                "spki",
+                publicKeyBuffer,
+                {
+                    name: "RSA-OAEP",
+                    hash: { name: "SHA-256" },
+                },
+                true,
+                ["encrypt"]
+            );
+
+            return importedKey;
+        }
+
+    </script>
+</body>
+</html>
